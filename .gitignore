@@ -1,0 +1,49 @@
+# ─── Environment & Secrets ────────────────────────────────────────────────────
+.env
+*.env
+**/salesforce_state.json
+
+# ─── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+.eggs/
+build/
+dist/
+venv/
+.venv/
+env/
+
+# ─── Output & Generated Files ────────────────────────────────────────────────
+output/
+generated_videos/
+*.mp4
+*.webm
+
+# ─── Data / Cache (Agent 1) ──────────────────────────────────────────────────
+.data/
+**/cache/*.json
+**/logs/
+
+# ─── JSON (ignore generated, keep configs) ───────────────────────────────────
+**/agent_output/*.json
+**/audit/*.json
+cursor_actions.json
+merge_metadata.json
+
+# ─── IDE ─────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ─── OS ──────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ─── Misc ────────────────────────────────────────────────────────────────────
+*.log
+.langgraph_api/
+.amazonq/
