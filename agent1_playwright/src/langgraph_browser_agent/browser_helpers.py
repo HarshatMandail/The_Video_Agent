@@ -27,7 +27,26 @@ async def is_classic_fallback_page(page: Page) -> bool:
             return False
         return "You can't view this item in Lightning Experience" in content
     except Exception:
-        return False
+        pass
+
+    # Fallback: check via title or known selectors when text_content fails
+    # (e.g. page is inside an iframe or shadow DOM)
+    try:
+        title = await page.title()
+        if "classic" in title.lower() or "visualforce" in title.lower():
+            return True
+    except Exception:
+        pass
+
+    try:
+        # Salesforce shows a specific link to switch to Classic
+        classic_link = page.locator('a:has-text("Salesforce Classic"), a:has-text("Switch to Salesforce Classic")')
+        if await classic_link.first.is_visible(timeout=2000):
+            return True
+    except Exception:
+        pass
+
+    return False
 
 
 async def should_start_recording(page) -> bool:

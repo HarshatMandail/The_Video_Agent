@@ -14,6 +14,7 @@ from .config import (
     NAVIGATION_TIMEOUT_MS,
     PAGE_LOAD_TIMEOUT_MS,
     SAFE_LIGHTNING_FALLBACK_URL,
+    VIDEO_CLIPS_DIR,
     WAIT_FOR_LOGIN_TIMEOUT,
     LOGIN_CHECK_INTERVAL,
     RECORD_CURSOR_METADATA,
@@ -31,6 +32,21 @@ from .state import AgentState
 logger = logging.getLogger(__name__)
 
 MAX_WORKFLOW_PAGES = int(os.getenv("MAX_WORKFLOW_PAGES", "6"))
+
+
+def _clean_junk_recordings() -> None:
+    """Remove any video files created by a discarded recording context."""
+    from pathlib import Path
+    video_dir = Path(VIDEO_CLIPS_DIR)
+    if not video_dir.exists():
+        return
+    for ext in ("*.webm", "*.mp4"):
+        for f in video_dir.glob(ext):
+            try:
+                f.unlink()
+            except Exception:
+                pass
+    logger.info("Cleaned junk recordings from discarded context.")
 
 _LOGIN_INDICATORS = ["/login", "/signin", "/sign-in", "/sso", "/oauth", "/authorize"]
 _AUTH_INDICATORS = ["/verification", "/verify", "/mfa", "/two-factor", "/challenge", "emailverification", "/_ui/identity/"]
@@ -73,6 +89,18 @@ def _build_fallback_url(current_url: str) -> str:
     parsed = urlparse(current_url)
     base = f"{parsed.scheme}://{parsed.netloc}"
     return f"{base}/lightning/o/Contact/list"
+
+
+async def _redirect_from_classic_fallback(page: Page, audit: AuditLogger) -> None:
+    """Redirect away from Classic fallback page to a clean Lightning view."""
+    fallback_url = SAFE_LIGHTNING_FALLBACK_URL or _build_fallback_url(page.url)
+    logger.warning(
+        "Detected Salesforce Classic fallback page. "
+        f"Redirecting to safe Lightning page: {fallback_url}"
+    )
+    audit.log("classic_fallback_redirect", {"from": page.url[:120], "to": fallback_url})
+    await page.goto(fallback_url, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS)
+    await _wait_for_network_idle(page, timeout_ms=10000)
 
 
 async def _activate_home_tab(page: Page) -> None:
@@ -235,6 +263,11 @@ async def navigate_and_crawl(state: AgentState) -> dict:
         return {"page_captures": []}
 
     reset_session()
+    # Clear LLM cache from previous runs to prevent stale responses
+    # (e.g. planner returning old needs_navigation=false after prompt changes)
+    from .cache import clear_cache
+    clear_cache()
+
     pool = get_browser_pool()
     cursor_recorder = None
 
@@ -254,31 +287,57 @@ async def navigate_and_crawl(state: AgentState) -> dict:
         if _is_app_url(current_url):
             logger.info("Already logged in, skipping login wait.")
             audit.log("already_logged_in")
-            home_url = _get_home_url(current_url)
-            context, page = await pool.restart_with_recording()
-            await page.goto(home_url, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS)
-            await _wait_for_network_idle(page, timeout_ms=10000)
-            await _activate_home_tab(page)
         else:
             logger.info("Login page detected. Please complete login + 2FA in the browser.")
             await _wait_for_login(page, audit)
-            home_url = _get_home_url(page.url)
-            context, page = await pool.restart_with_recording()
-            await page.goto(home_url, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS)
-            await _wait_for_network_idle(page, timeout_ms=10000)
-            await _activate_home_tab(page)
+            current_url = page.url  # Update after login — URL has changed
 
-        # Safety net: detect Salesforce Classic fallback pages that produce
-        # blank/unusable frames in the recording. Redirect to a clean Lightning
-        # list view so the video starts with useful content.
+        # Start recording in the SAME context that already has a valid session.
+        # This avoids the session-loss problem caused by creating a new context.
+        context, page = await pool.restart_with_recording()
+
+        # Navigate to the Lightning shell home page (/lightning/page/home).
+        # IMPORTANT: Do NOT use /lightning/o/Home/home — that triggers a
+        # Visualforce override in many orgs (Developer Edition, trial orgs)
+        # causing "You can't view this item in Lightning Experience".
+        parsed = urlparse(current_url)
+        base = f"{parsed.scheme}://{parsed.netloc}"
+        target_url = f"{base}/lightning/page/home"
+        await page.goto(target_url, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS)
+        await _wait_for_network_idle(page, timeout_ms=10000)
+
+        # After context switch, Salesforce may invalidate the session and
+        # redirect to login. If so, close the recording context (it captured
+        # junk), re-authenticate in a non-recording context, then start fresh.
+        post_nav_url = page.url
+        if _is_login_page(post_nav_url) or _is_auth_intermediate_page(post_nav_url) or not _is_app_url(post_nav_url):
+            logger.warning("Session lost after context switch — re-authenticating...")
+            audit.log("session_lost_relogin", {"url": post_nav_url[:120]})
+
+            # Discard the bad recording context and its junk video
+            await shutdown_browser_pool()
+            await asyncio.sleep(1)
+            _clean_junk_recordings()
+            pool = get_browser_pool()
+            context, page = await pool.acquire()
+
+            # Navigate to login and wait for user to re-authenticate
+            await page.goto(url, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS)
+            await asyncio.sleep(2)
+            await _wait_for_login(page, audit)
+
+            # Now restart with a clean recording context
+            context, page = await pool.restart_with_recording()
+            await page.goto(target_url, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS)
+            await _wait_for_network_idle(page, timeout_ms=10000)
+
+        # If we landed on the classic fallback despite using /lightning/page/home,
+        # redirect to a safe list view page.
         if await is_classic_fallback_page(page):
-            fallback_url = SAFE_LIGHTNING_FALLBACK_URL or _build_fallback_url(page.url)
-            logger.warning(
-                "Detected Salesforce Classic fallback page. "
-                f"Redirecting to safe Lightning page: {fallback_url}"
-            )
+            fallback_url = SAFE_LIGHTNING_FALLBACK_URL or _build_fallback_url(current_url)
             await page.goto(fallback_url, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS)
             await _wait_for_network_idle(page, timeout_ms=10000)
+            audit.log("classic_fallback_redirect", {"to": fallback_url})
 
         logger.info("Recording context ready. Starting task capture.")
         await asyncio.sleep(3)
@@ -342,8 +401,23 @@ async def _execute_workflow_navigation(
         return extra_captures
 
     if not plan.get("needs_navigation"):
-        logger.info("No additional navigation needed.")
-        return extra_captures
+        # Safety net: if the query involves creating a record and we're on a list
+        # view, the planner should have planned click_button→"New". If it didn't,
+        # inject the step ourselves.
+        query_lower = user_query.lower()
+        creation_keywords = ["create", "new", "add"]
+        is_creation_task = any(k in query_lower for k in creation_keywords)
+        is_list_view = "/list" in primary.url or "list view" in primary.title.lower()
+
+        if is_creation_task and is_list_view:
+            logger.info("Planner skipped New button — injecting click_button step.")
+            plan = {
+                "needs_navigation": True,
+                "steps": [{"action": "click_button", "target": "New", "description": "Click New to open creation form", "wait_after": 2}],
+            }
+        else:
+            logger.info("No additional navigation needed.")
+            return extra_captures
 
     steps = plan.get("steps", [])
     max_steps = min(len(steps), MAX_WORKFLOW_PAGES - 1)
@@ -351,7 +425,7 @@ async def _execute_workflow_navigation(
 
     for i, step in enumerate(steps[:max_steps]):
         action = step.get("action", "")
-        target = step.get("target", "")
+        target = step.get("target") or ""
         description = step.get("description", "")
 
         logger.info(f"  Step {i+1}/{max_steps}: {description} [{action}: {target[:60]}]")
