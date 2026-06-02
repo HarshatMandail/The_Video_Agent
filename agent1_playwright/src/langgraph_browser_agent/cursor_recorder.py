@@ -58,6 +58,24 @@ _CAPTURE_SCRIPT = """
       key: e.key.length === 1 ? e.key : `[${e.key}]`,
     }));
   }, true);
+
+  // Capture scroll/wheel events (throttled) for video replay
+  document.addEventListener('wheel', (() => {
+    let last = 0;
+    return (e) => {
+      const now = Date.now();
+      if (now - last < 300) return;
+      last = now;
+      window.__reportCursorAction(JSON.stringify({
+        action: 'scroll',
+        x: e.clientX,
+        y: e.clientY,
+        deltaX: Math.round(e.deltaX),
+        deltaY: Math.round(e.deltaY),
+        element: '',
+      }));
+    };
+  })(), {passive: true, capture: true});
 }
 """
 
@@ -100,6 +118,9 @@ class CursorRecorder:
 
         if data.get("key"):
             record["key"] = data["key"]
+        if data.get("deltaY") is not None:
+            record["deltaX"] = data.get("deltaX", 0)
+            record["deltaY"] = data.get("deltaY", 0)
 
         record["description"] = _build_description(record)
         self._actions.append(record)
@@ -135,4 +156,8 @@ def _build_description(record: dict) -> str:
         key = record.get("key", "")
         target = f" in {element}" if element else ""
         return f"Typed '{key}'{target}"
+    if action == "scroll":
+        delta_y = record.get("deltaY", 0)
+        direction = "down" if delta_y > 0 else "up"
+        return f"Scrolled {direction} by {abs(delta_y)}px at ({record['x']}, {record['y']})"
     return f"{action} at ({record['x']}, {record['y']})"

@@ -1,5 +1,27 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Literal, Optional
+
+
+# Supported navigation action types including scroll variants
+ActionType = Literal[
+    "click_nav",
+    "click_button",
+    "goto_url",
+    "SCROLL_INTO_VIEW",
+    "SCROLL_DOWN",
+    "SCROLL_TO_BOTTOM",
+    "SCROLL_BY",
+]
+
+
+class NavigationStep(BaseModel):
+    """A single navigation or scroll action in a workflow plan."""
+    action: ActionType
+    target: str = ""
+    description: str = ""
+    wait_after: int = 2
+    delta: Optional[int] = Field(default=None, description="Scroll distance in pixels (for SCROLL_BY/SCROLL_DOWN)")
+    locator: Optional[str] = Field(default=None, description="CSS selector to scroll into view (for SCROLL_INTO_VIEW)")
 
 
 class UIElement(BaseModel):

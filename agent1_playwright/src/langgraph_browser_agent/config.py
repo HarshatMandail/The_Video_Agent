@@ -54,6 +54,10 @@ BROWSER_USER_AGENT = os.getenv(
     "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
 )
 
+# Fallback URL when Salesforce lands on a Classic/Visualforce override page
+# that cannot render in Lightning Experience (common in trial orgs).
+SAFE_LIGHTNING_FALLBACK_URL = os.getenv("SAFE_LIGHTNING_FALLBACK_URL", "")
+
 _raw_allowlist = os.getenv("URL_ALLOWLIST", "")
 URL_ALLOWLIST: list[str] = [
     d.strip().lower() for d in _raw_allowlist.split(",") if d.strip()

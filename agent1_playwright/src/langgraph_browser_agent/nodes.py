@@ -7,12 +7,13 @@ from urllib.parse import urlparse
 
 from playwright.async_api import Page
 
-from .browser_helpers import capture_page
+from .browser_helpers import capture_page, is_classic_fallback_page, perform_scroll
 from .browser_pool import get_browser_pool, shutdown_browser_pool, save_login_state
 from .config import (
     AGENT_OUTPUT_DIR,
     NAVIGATION_TIMEOUT_MS,
     PAGE_LOAD_TIMEOUT_MS,
+    SAFE_LIGHTNING_FALLBACK_URL,
     WAIT_FOR_LOGIN_TIMEOUT,
     LOGIN_CHECK_INTERVAL,
     RECORD_CURSOR_METADATA,
@@ -21,7 +22,7 @@ from .cursor_recorder import CursorRecorder
 from .cost_tracker import get_session, reset_session, estimate_tokens
 from .llm import analyze_with_llm
 from .logger import AuditLogger
-from .models import Agent1Output, PageCapture, PageContext, UIElement
+from .models import Agent1Output, NavigationStep, PageCapture, PageContext, UIElement
 from .navigation_planner import plan_navigation
 from .prompts import SYSTEM_PROMPT
 from .security import assert_url_safe, SecurityError
@@ -65,6 +66,13 @@ def _get_home_url(current_url: str) -> str:
     if "lightning.force.com" in current_url or "salesforce.com" in current_url:
         return f"{base}/lightning/o/Home/home"
     return f"{base}/"
+
+
+def _build_fallback_url(current_url: str) -> str:
+    """Construct a safe Lightning list view URL from the current org domain."""
+    parsed = urlparse(current_url)
+    base = f"{parsed.scheme}://{parsed.netloc}"
+    return f"{base}/lightning/o/Contact/list"
 
 
 async def _activate_home_tab(page: Page) -> None:
@@ -260,6 +268,18 @@ async def navigate_and_crawl(state: AgentState) -> dict:
             await _wait_for_network_idle(page, timeout_ms=10000)
             await _activate_home_tab(page)
 
+        # Safety net: detect Salesforce Classic fallback pages that produce
+        # blank/unusable frames in the recording. Redirect to a clean Lightning
+        # list view so the video starts with useful content.
+        if await is_classic_fallback_page(page):
+            fallback_url = SAFE_LIGHTNING_FALLBACK_URL or _build_fallback_url(page.url)
+            logger.warning(
+                "Detected Salesforce Classic fallback page. "
+                f"Redirecting to safe Lightning page: {fallback_url}"
+            )
+            await page.goto(fallback_url, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS)
+            await _wait_for_network_idle(page, timeout_ms=10000)
+
         logger.info("Recording context ready. Starting task capture.")
         await asyncio.sleep(3)
 
@@ -340,7 +360,7 @@ async def _execute_workflow_navigation(
         try:
             await asyncio.sleep(2)
 
-            navigated = await _execute_single_step(page, action, target, state)
+            navigated = await _execute_single_step(page, action, target, state, step_data=step)
             if not navigated:
                 logger.warning(f"  Step {i+1}: Could not execute, skipping.")
                 audit.log("workflow_step_skipped", {"step": i+1, "reason": "element_not_found"})
@@ -367,7 +387,10 @@ async def _execute_workflow_navigation(
     return extra_captures
 
 
-async def _execute_single_step(page: Page, action: str, target: str, state=None) -> bool:
+_SCROLL_ACTIONS = {"SCROLL_INTO_VIEW", "SCROLL_DOWN", "SCROLL_TO_BOTTOM", "SCROLL_BY"}
+
+
+async def _execute_single_step(page: Page, action: str, target: str, state=None, step_data: dict | None = None) -> bool:
     if action == "goto_url":
         await page.goto(target, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT_MS)
         return True
@@ -375,6 +398,14 @@ async def _execute_single_step(page: Page, action: str, target: str, state=None)
         return await _click_element(page, target, element_type="link")
     if action == "click_button":
         return await _click_element(page, target, element_type="button")
+    if action in _SCROLL_ACTIONS:
+        nav_step = NavigationStep(
+            action=action,
+            target=target,
+            delta=step_data.get("delta") if step_data else None,
+            locator=step_data.get("locator") if step_data else None,
+        )
+        return await perform_scroll(page, nav_step)
     logger.warning(f"Unknown action type: {action}")
     return False
 

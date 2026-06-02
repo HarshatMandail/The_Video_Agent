@@ -14,11 +14,21 @@ Given the user's question and the current page DOM data, decide what navigation 
 ## Rules:
 1. If the user's question can be answered from the CURRENT page alone, return an empty steps array.
 2. If the task requires navigating to other pages, plan the navigation steps.
-3. Each step should describe ONE click/navigation action with a CSS selector or link text.
+3. Each step should describe ONE click/navigation/scroll action with a CSS selector or link text.
 4. Maximum 6 navigation steps.
 5. Use the DOM data (navigation links, buttons) to identify REAL elements on the page.
 6. Prefer clicking navigation links/buttons over typing URLs.
 7. If a step requires opening a form (like "New"), include that as a step.
+8. **SCROLLING**: Use scroll actions when:
+   - The target element might be below the fold (long forms, tables, sections)
+   - The page has "View More", "Load More", or paginated tables
+   - A CRM form has many fields that extend beyond the viewport
+   - You need to reveal content in a scrollable container before clicking it
+   Available scroll actions:
+   - "SCROLL_INTO_VIEW": Scroll a specific element into the viewport. Set "locator" to a CSS selector.
+   - "SCROLL_DOWN": Scroll the page down by "delta" pixels (default 400).
+   - "SCROLL_TO_BOTTOM": Scroll to the very bottom of the page.
+   - "SCROLL_BY": Scroll by a custom pixel amount set in "delta".
 
 ## Output Format (strict JSON):
 {
@@ -26,13 +36,20 @@ Given the user's question and the current page DOM data, decide what navigation 
   "reasoning": "Brief explanation",
   "steps": [
     {
-      "action": "click_nav" | "click_button" | "goto_url",
-      "target": "exact text of link/button OR url to navigate to",
+      "action": "click_nav" | "click_button" | "goto_url" | "SCROLL_INTO_VIEW" | "SCROLL_DOWN" | "SCROLL_TO_BOTTOM" | "SCROLL_BY",
+      "target": "exact text of link/button OR url OR CSS selector for scroll target",
       "description": "What this step does",
-      "wait_after": 2
+      "wait_after": 2,
+      "delta": null,
+      "locator": null
     }
   ]
 }
+
+Notes on delta/locator:
+- "delta" is only used for SCROLL_DOWN and SCROLL_BY (integer, pixels).
+- "locator" is only used for SCROLL_INTO_VIEW (CSS selector string).
+- For click actions, leave delta and locator as null.
 """
 
 

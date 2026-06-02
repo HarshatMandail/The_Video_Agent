@@ -2,13 +2,32 @@ import asyncio
 import json
 import logging
 from datetime import datetime
+from typing import Optional
 
 from playwright.async_api import Page
 
 from .config import SCREENSHOTS_DIR
-from .models import PageCapture
+from .models import NavigationStep, PageCapture
 
 logger = logging.getLogger(__name__)
+
+
+async def is_classic_fallback_page(page: Page) -> bool:
+    """Detect the Salesforce Classic fallback page that can't render in Lightning.
+
+    Some Salesforce trial orgs have Home tab overrides pointing to Visualforce pages.
+    When this happens, Lightning shows a blank page with the message:
+    "You can't view this item in Lightning Experience. Open in Salesforce Classic."
+
+    This wastes recording frames, so we detect it early and redirect.
+    """
+    try:
+        content = await page.text_content("body", timeout=3000)
+        if not content:
+            return False
+        return "You can't view this item in Lightning Experience" in content
+    except Exception:
+        return False
 
 
 async def should_start_recording(page) -> bool:
@@ -112,6 +131,83 @@ _DOM_EXTRACTION_SCRIPT = """() => JSON.stringify({
     tables: Array.from(document.querySelectorAll('table')).length,
     modals: Array.from(document.querySelectorAll('[role="dialog"], .modal, .modal-dialog')).length
 })"""
+
+
+# ---------------------------------------------------------------------------
+# Scrolling Support
+# ---------------------------------------------------------------------------
+
+_DEFAULT_SCROLL_DELTA = 400
+_SCROLL_NETWORK_TIMEOUT_MS = 8000
+_SCROLL_SETTLE_MS = 600
+
+
+async def perform_scroll(page: Page, step: NavigationStep) -> bool:
+    """Execute a scroll action smoothly for natural video recording.
+
+    Supports:
+      - SCROLL_INTO_VIEW: scroll a specific element into the viewport
+      - SCROLL_DOWN: scroll viewport down by delta pixels (default 400)
+      - SCROLL_TO_BOTTOM: scroll to the bottom of the page/container
+      - SCROLL_BY: scroll by an arbitrary pixel delta
+
+    Returns True if the scroll succeeded.
+    """
+    action = step.action
+    delta = step.delta or _DEFAULT_SCROLL_DELTA
+    locator_selector = step.locator or step.target
+
+    try:
+        if action == "SCROLL_INTO_VIEW":
+            if not locator_selector:
+                logger.warning("SCROLL_INTO_VIEW requires a locator/target selector.")
+                return False
+            # Try pierce selector for shadow DOM (Salesforce Lightning)
+            loc = page.locator(f"pierce/{locator_selector}").first
+            try:
+                if not await loc.is_visible(timeout=3000):
+                    loc = page.locator(locator_selector).first
+            except Exception:
+                loc = page.locator(locator_selector).first
+            await loc.scroll_into_view_if_needed(timeout=5000)
+
+        elif action == "SCROLL_DOWN":
+            await page.mouse.wheel(0, delta)
+
+        elif action == "SCROLL_TO_BOTTOM":
+            await page.evaluate("window.scrollTo({top: document.body.scrollHeight, behavior: 'smooth'})")
+
+        elif action == "SCROLL_BY":
+            await page.evaluate(f"window.scrollBy({{top: {delta}, behavior: 'smooth'}})")
+
+        else:
+            logger.warning(f"Unknown scroll action: {action}")
+            return False
+
+        # Smart waits: let network settle + natural pause for video smoothness
+        await _post_scroll_wait(page)
+        logger.info(f"Scroll executed: {action} (delta={delta}, target={locator_selector[:60] if locator_selector else 'N/A'})")
+        return True
+
+    except Exception as e:
+        logger.warning(f"Scroll failed ({action}): {e}")
+        # Fallback: JS smooth scroll
+        try:
+            await page.evaluate(f"window.scrollBy({{top: {delta}, behavior: 'smooth'}})")
+            await _post_scroll_wait(page)
+            return True
+        except Exception as fallback_err:
+            logger.warning(f"Scroll fallback also failed: {fallback_err}")
+            return False
+
+
+async def _post_scroll_wait(page: Page) -> None:
+    """Wait for network idle + settle time after scrolling for smooth video."""
+    try:
+        await page.wait_for_load_state("networkidle", timeout=_SCROLL_NETWORK_TIMEOUT_MS)
+    except Exception:
+        pass
+    await page.wait_for_timeout(_SCROLL_SETTLE_MS)
 
 
 async def capture_page(page, state=None):
