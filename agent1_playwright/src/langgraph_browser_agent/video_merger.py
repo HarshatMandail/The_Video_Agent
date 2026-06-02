@@ -180,10 +180,8 @@ def _transcode_to_mp4(input_path: Path, output_path: Path) -> None:
         "-i", str(input_path),
         "-c:v", "libx264",
         "-preset", "fast",
-        "-crf", "20",
+        "-crf", "18",
         "-r", "30",
-        "-vf", "scale=1280:720:force_original_aspect_ratio=decrease,"
-               "pad=1280:720:(ow-iw)/2:(oh-ih)/2:black",
         "-pix_fmt", "yuv420p",
         "-an",
         "-movflags", "+faststart",
