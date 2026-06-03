@@ -19,9 +19,9 @@ from langgraph.graph import END, StateGraph
 from loguru import logger
 
 from config.settings import settings
+from nodes.cursor_overlay import apply_cursor_overlay
 from nodes.utils import cleanup_clips, cleanup_preprocessed, concatenate_clips, ensure_directories
-from nodes.video_splitter import split_video_into_clips
-from nodes.video_processor import process_clips_sequentially
+from nodes.video_processor import split_video_into_clips, process_clips_sequentially
 
 
 class PipelineState(TypedDict):
@@ -31,7 +31,6 @@ class PipelineState(TypedDict):
     raw_video_path: str
     user_prompt: str
     platform_name: str
-    use_video_edit_mode: bool
     clips: list[dict[str, Any]]
     clip_results: list[dict[str, Any]]
     final_video_path: str
@@ -98,7 +97,7 @@ def node_split(state: PipelineState) -> dict[str, Any]:
 
 
 def node_process(state: PipelineState) -> dict[str, Any]:
-    """Node 3: Process clips sequentially (animate first, extend rest)."""
+    """Node 3: Process clips with Grok Imagine Video + cursor overlay."""
     if state.get("status") == "failed":
         return {"clip_results": []}
 
@@ -107,20 +106,17 @@ def node_process(state: PipelineState) -> dict[str, Any]:
     user_prompt = state.get("user_prompt", "")
     platform_name = state.get("platform_name", "Salesforce")
 
-    use_video_edit_mode = state.get("use_video_edit_mode", False)
-
-    # Resolve input directory from raw video path (for cursor_actions.json lookup)
+    # Resolve input directory from raw video path (for cursor_actions.json)
     from pathlib import Path as _Path
-    input_dir = _Path(state.get("raw_video_path", "")).parent if use_video_edit_mode else None
+    input_dir = _Path(state.get("raw_video_path", "")).parent
 
-    logger.info(f"[Job {job_id}] Processing {len(clips)} clips (edit-video, video_edit_mode={use_video_edit_mode})...")
+    logger.info(f"[Job {job_id}] Processing {len(clips)} clips with cursor overlay...")
 
     async def _run() -> list[dict[str, Any]]:
         return await process_clips_sequentially(
             clips=clips,
             user_prompt=user_prompt,
             platform_name=platform_name,
-            use_video_edit_mode=use_video_edit_mode,
             input_dir=input_dir,
         )
 
@@ -146,18 +142,23 @@ def node_concatenate(state: PipelineState) -> dict[str, Any]:
         return {"final_video_path": "", "status": "failed"}
 
     if any(r["status"] == "dry_run" for r in clip_results):
-        logger.info(f"[Job {job_id}] Dry run — skipping concatenation.")
-        return {"final_video_path": "dry_run_no_output", "status": "finalizing"}
+        logger.info(f"[Job {job_id}] Dry run — using FFmpeg cursor overlay (Path B) instead.")
+        return _fallback_to_cursor_overlay(state)
 
+    usable_statuses = ("success", "fallback")
     successful_paths = [
         r["path"]
         for r in sorted(clip_results, key=lambda x: x["clip_index"])
-        if r["status"] == "success"
+        if r["status"] in usable_statuses
     ]
 
     if not successful_paths:
-        logger.error(f"[Job {job_id}] No successful clips to concatenate.")
+        logger.error(f"[Job {job_id}] No usable clips to concatenate.")
         return {"status": "failed", "error": "All clips failed.", "final_video_path": ""}
+
+    enhanced = sum(1 for r in clip_results if r["status"] == "success")
+    fallback = sum(1 for r in clip_results if r["status"] == "fallback")
+    logger.info(f"[Job {job_id}] Concatenating {len(successful_paths)} clips ({enhanced} enhanced, {fallback} raw fallback)")
 
     try:
         final_path = concatenate_clips(successful_paths, job_id)
@@ -175,6 +176,31 @@ def node_finalize(state: PipelineState) -> dict[str, Any]:
 
     logger.success(f"[Job {job_id}] Pipeline complete | video={state.get('final_video_path')}")
     return {"status": "completed", "error": ""}
+
+
+def _fallback_to_cursor_overlay(state: PipelineState) -> dict[str, Any]:
+    """Apply FFmpeg cursor overlay (Path B) when Grok API is skipped (dry run)."""
+    from pathlib import Path
+
+    job_id = state["job_id"]
+    raw_video = state["raw_video_path"]
+    input_dir = Path(raw_video).parent
+    cursor_actions_path = input_dir / "cursor_actions.json"
+
+    if not cursor_actions_path.exists():
+        logger.warning(f"[Job {job_id}] No cursor_actions.json found — cannot apply Path B.")
+        return {"final_video_path": raw_video, "status": "finalizing"}
+
+    try:
+        output = apply_cursor_overlay(
+            video_path=raw_video,
+            cursor_actions_path=str(cursor_actions_path),
+        )
+        logger.success(f"[Job {job_id}] Path B cursor overlay complete: {output}")
+        return {"final_video_path": output, "status": "finalizing"}
+    except Exception as e:
+        logger.error(f"[Job {job_id}] Path B failed: {e} — returning raw video.")
+        return {"final_video_path": raw_video, "status": "finalizing"}
 
 
 def build_pipeline_graph() -> StateGraph:
@@ -202,7 +228,6 @@ async def run_pipeline(
     user_prompt: str = "",
     platform_name: str = "Salesforce",
     job_id: str | None = None,
-    use_video_edit_mode: bool = False,
 ) -> dict[str, Any]:
     """
     Execute the full video generation pipeline.
@@ -212,8 +237,6 @@ async def run_pipeline(
         user_prompt: Enhancement/animation prompt for the video.
         platform_name: Platform name for prompt context.
         job_id: Optional custom job ID.
-        use_video_edit_mode: If True, uses GROK_IMAGINE_VIDEO_EDIT_PROMPT with
-            cursor_actions.json metadata for precise cursor overlay.
 
     Returns:
         Final pipeline state with video path and metadata.
@@ -223,7 +246,6 @@ async def run_pipeline(
         "raw_video_path": raw_video_path,
         "user_prompt": user_prompt,
         "platform_name": platform_name,
-        "use_video_edit_mode": use_video_edit_mode,
         "clips": [],
         "clip_results": [],
         "final_video_path": "",

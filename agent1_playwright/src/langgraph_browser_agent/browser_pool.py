@@ -124,7 +124,6 @@ class BrowserPool:
             "viewport": {"width": 1280, "height": 720},
             "ignore_https_errors": True,
             "extra_http_headers": {"Accept-Language": "en-US"},
-            "device_scale_factor": 2,
         }
 
         if storage_state:
@@ -132,9 +131,9 @@ class BrowserPool:
 
         if recording:
             context_opts["record_video_dir"] = str(VIDEO_CLIPS_DIR)
-            context_opts["record_video_size"] = {"width": 1920, "height": 1080}
+            context_opts["record_video_size"] = {"width": 1280, "height": 720}
             self._is_recording = True
-            logger.info("Video recording ENABLED (1080p)")
+            logger.info("Video recording ENABLED (720p)")
         else:
             self._is_recording = False
             logger.debug("Video recording DISABLED (login phase)")

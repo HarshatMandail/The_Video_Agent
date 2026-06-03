@@ -19,6 +19,7 @@ from loguru import logger
 
 from config.settings import settings
 from generate_tutorial import generate_tutorial_video
+from nodes.cursor_overlay import apply_cursor_overlay
 
 logger.remove()
 logger.add(
@@ -60,7 +61,12 @@ def _create_sample_video() -> str:
 
 async def main() -> None:
     """Run the pipeline."""
-    # Check if user provided a video path
+    # ─── Cursor Overlay Mode (independent of Grok) ───────────────────────────
+    if "--cursor-overlay" in sys.argv:
+        _run_cursor_overlay()
+        return
+
+    # ─── Standard Grok Pipeline ──────────────────────────────────────────────
     if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
         raw_video_path = sys.argv[1]
         if not Path(raw_video_path).exists():
@@ -96,6 +102,50 @@ async def main() -> None:
 
     if result.get("error"):
         logger.error(f"Error: {result['error']}")
+
+
+def _run_cursor_overlay() -> None:
+    """
+    Run FFmpeg cursor overlay independently.
+
+    Usage:
+        python main.py --cursor-overlay <video_path> <cursor_actions.json> [--no-ripple]
+    """
+    args = [a for a in sys.argv[1:] if a != "--cursor-overlay"]
+    no_ripple = "--no-ripple" in args
+    args = [a for a in args if a != "--no-ripple"]
+
+    if len(args) < 2:
+        print("Usage: python main.py --cursor-overlay <video.mp4> <cursor_actions.json> [--no-ripple]")
+        print("\nExample:")
+        print("  python main.py --cursor-overlay ../output/raw_video.mp4 ../output/cursor_actions.json")
+        return
+
+    video_path, actions_path = args[0], args[1]
+
+    if not Path(video_path).exists():
+        logger.error(f"Video not found: {video_path}")
+        return
+    if not Path(actions_path).exists():
+        logger.error(f"cursor_actions.json not found: {actions_path}")
+        return
+
+    logger.info("=" * 60)
+    logger.info("CURSOR OVERLAY — FFmpeg Programmatic Mode")
+    logger.info(f"Video: {video_path}")
+    logger.info(f"Actions: {actions_path}")
+    logger.info(f"Ripple: {'enabled' if not no_ripple else 'disabled'}")
+    logger.info("=" * 60)
+
+    try:
+        output = apply_cursor_overlay(
+            video_path=video_path,
+            cursor_actions_path=actions_path,
+            show_ripple=not no_ripple,
+        )
+        logger.success(f"Done! Output: {output}")
+    except Exception as e:
+        logger.error(f"Cursor overlay failed: {e}")
 
 
 if __name__ == "__main__":
